@@ -5,13 +5,17 @@ from cub2011 import Cub2011
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.models as models
 import torchvision.transforms as T
 from torch.utils.data import DataLoader, Dataset
+import sklearn.preprocessing
 from PIL import Image
 
 device = torch.device('cpu')
 model_types = [(models.resnet18, "resnet18"), (models.resnet50, "resnet50"), (models.resnet101, "resnet101")]
+
+labels_path = "cub2011/CUB_200_2011/classes.txt"
 
 evaluation_transform = T.Compose([
     T.Resize(256),
@@ -76,6 +80,33 @@ def recall_at_k(embeddings, labels, k=3):
                 break
     return correct / numEmbeddings
 
+def binarize_and_smooth_labels(T, nb_classes, smoothing_const=0.1):
+    T = T.cpu().numpy()
+    T = sklearn.preprocessing.label_binarize(T, classes=range(nb_classes))
+    T = T * (1 - smoothing_const)
+    T[T == 0] = smoothing_const / (nb_classes - 1)
+    return torch.FloatTensor(T).to(device)
+
+class ProxyNCA(nn.Module):
+    def __init__(self, num_classes, embedding_dim=512, smoothing_const=0.1,
+                 scaling_x=1.0, scaling_p=3.0):
+        super().__init__()
+        self.proxies = nn.Parameter(torch.randn(num_classes, embedding_dim) / 8)
+        self.smoothing_const = smoothing_const
+        self.scaling_x = scaling_x
+        self.scaling_p = scaling_p
+        self.num_classes = num_classes
+
+    def forward(self, z, labels):
+        P = F.normalize(self.proxies, p=2, dim=-1) * self.scaling_p
+        Z = F.normalize(z, p=2, dim=-1) * self.scaling_x
+
+        D = torch.cdist(Z, P) ** 2
+
+        T = binarize_and_smooth_labels(labels, self.num_classes, self.smoothing_const)
+        loss = torch.sum(-T * F.log_softmax(-D, dim=-1), dim=-1)
+        return loss.mean()
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="constrastive_model_predict"
@@ -90,6 +121,11 @@ def main(argv=None):
     return args
 
 if __name__ == '__main__':
+    labels = []
+    with open(labels_path, "r", encoding='utf-8') as f:
+        for line in f:
+            labels.append(line.rstrip("\n"))
+
     args = main()
     model_file = str(args.model)
     input = args.input
@@ -106,7 +142,7 @@ if __name__ == '__main__':
         model.fc = nn.Linear(128, 200)
         model.eval
 
-        print(model.encoder.parameters())
+        #print(model.encoder.parameters())
 
         with torch.no_grad():
             out = model(inp)
@@ -114,4 +150,15 @@ if __name__ == '__main__':
             pred_class = probs.argmax(dim=1).item()
             confidence = probs.max().item()
 
-        print(f"predicted class: {pred_class}, confidence: {confidence:.4f}")
+        print(f"predicted class: {labels[pred_class]}, confidence: {confidence:.4f}")
+    elif "ProxyNCA" in model_file:
+        base_model = model_type[0](weights='DEFAULT')
+        embedding_dim = base_model.fc.in_features
+        base_model.fc = nn.Linear(128, 200)
+        encoder_model = base_model.to(device)
+
+        proxy_nca_loss_fn = ProxyNCA(num_classes=100, embedding_dim=embedding_dim).to(device)
+        
+        checkpoint = torch.load(model_file, map_location=device)
+        encoder_model.load_state_dict(checkpoint['encoder'])
+        proxy_nca_loss_fn.load_state_dict(checkpoint['proxies'])
