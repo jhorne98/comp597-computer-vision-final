@@ -12,8 +12,8 @@ import sklearn.metrics.cluster
 
 from cub2011 import Cub2011
 
-#CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'proxynca_model_resnet50.pth')
-CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frozen_proxynca_model_resnet50.pth')
+CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'proxynca_model_resnet50.pth')
+#CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frozen_proxynca_model_resnet50.pth')
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
@@ -89,7 +89,7 @@ def evaluate(model, dataloader, nb_classes, with_nmi=True): #returns recall at k
     Y = assign_by_euclidian_at_k(X, T, 8)
     Y = torch.from_numpy(Y)
     recall = []
-    for k in [1, 2, 4, 8, 10]:
+    for k in [1, 3, 5, 10]:
         r_at_k = calc_recall_at_k(T, Y, k)
         recall.append(r_at_k)
         print("R@{} : {:.3f}".format(k, 100 * r_at_k))
