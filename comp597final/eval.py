@@ -12,8 +12,10 @@ import sklearn.metrics.cluster
 
 from cub2011 import Cub2011
 
-CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'proxynca_model_resnet50.pth')
-#CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frozen_proxynca_model_resnet50.pth')
+model_files = ["proxynca_model_resnet18.pth", "proxynca_model_resnet50.pth", "frozen_proxynca_model_resnet18.pth",  "frozen_proxynca_model_resnet50.pth", "frozen_proxynca_model_resnet101.pth"]
+
+#CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'proxynca_model_.pth')
+#CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frozen_proxynca_model_.pth')
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
@@ -100,27 +102,34 @@ def evaluate(model, dataloader, nb_classes, with_nmi=True): #returns recall at k
 
 
 if __name__ == '__main__':
-    full_test_dataset = Cub2011(root='./cub2011', train=False, download=True, transform=evaluation_transform_NCA)
-    # Only keep samples with target in 100-199 (last 100 classes)
-    test_indices = [i for i, (_, target) in enumerate(full_test_dataset) if 100 <= target < 200]
-    test_dataset = Subset(full_test_dataset, test_indices)
-    test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=2)
+    for i in range (len(model_files)):
+        CHECKPOINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), model_files[i])
+        test_dataset = Cub2011(root='./cub2011', train=False, download=True, transform=evaluation_transform_NCA)
+        test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=2)
+
+        print(f"Evaluating model: {model_files[i]}")
+
+        if "resnet18" in model_files[i]:
+            base_model = models.resnet18(weights=None)
+        elif "resnet50" in model_files[i]:
+            base_model = models.resnet50(weights=None)
+        elif "resnet101" in model_files[i]:
+            base_model = models.resnet101(weights=None)
+        embedding_dim = 64
+        base_model.fc = nn.Linear(base_model.fc.in_features, embedding_dim)
+        encoder_model = base_model.to(device)
+
+        print('\n')
 
 
-    base_model = models.resnet50(weights=None)
-    embedding_dim = 64
-    base_model.fc = nn.Linear(base_model.fc.in_features, embedding_dim)
-    encoder_model = base_model.to(device)
+        # Load the saved state dictionaries for encoder
+        print(f"Loading checkpoint: {CHECKPOINT}")
+        checkpoint = torch.load(CHECKPOINT, map_location=device)
+        encoder_model.load_state_dict(checkpoint['encoder'])
+        encoder_model.eval()
 
-
-    # Load the saved state dictionaries for encoder
-    print(f"Loading checkpoint: {CHECKPOINT}")
-    checkpoint = torch.load(CHECKPOINT, map_location=device)
-    encoder_model.load_state_dict(checkpoint['encoder'])
-    encoder_model.eval()
-
-    print("Evaluating...")
-    evaluate(encoder_model, test_loader, nb_classes=100)
+        print("Evaluating...")
+        evaluate(encoder_model, test_loader, nb_classes=100)
 
 
 

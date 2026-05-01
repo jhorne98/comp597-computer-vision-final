@@ -2,7 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 import torchvision.transforms as T
 import torchvision.models as models
 import sklearn.preprocessing
@@ -57,10 +57,7 @@ class ProxyNCA(nn.Module):
 
 if __name__ == '__main__':
     #training loop for proxynca
-    full_train_dataset = Cub2011(root='./cub2011', train=True, download=True, transform=proxy_transform)
-    #Only keep samples with target in 0-99 (first 100 classes)
-    train_indices = [i for i, (_, target) in enumerate(full_train_dataset) if 0 <= target < 100]
-    proxy_train_dataset = Subset(full_train_dataset, train_indices)
+    proxy_train_dataset = Cub2011(root='./cub2011', train=True, download=True, transform=proxy_transform)
     proxy_train_loader = DataLoader(proxy_train_dataset, batch_size=128, shuffle=True, num_workers=2, drop_last=True)
 
     #just use resnet50 for now
@@ -75,7 +72,7 @@ if __name__ == '__main__':
         encoder = base.to(device)
 
         proxy_loss_fn = ProxyNCA(
-            num_classes=100,  #100 classes for training split
+            num_classes=200,  #200 classes using dataloader split
             embedding_dim=embedding_dim,
         ).to(device)
 
