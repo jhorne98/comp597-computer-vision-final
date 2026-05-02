@@ -154,6 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-t", "--train", type=bool, default=False)
     parser.add_argument("-m", "--base_model", required=True)
+    parser.add_argument("-l", "--linear", required=True)
     parser.add_argument("-i", "--input", required=True)
     return parser
 
@@ -175,14 +176,15 @@ if __name__ == '__main__':
     base_model = base_model.group(0) if base_model else None
     model_type = next((m for m in model_types if m[1] == base_model), None)
 
+    print(args.train)
     if args.train:
         if "SimCLR" in model_file:
             train_dataset = Cub2011(root=str('./cub2011'), train=True, download=True)
-            label_dataset = SimCLRLabeledDataset(train_dataset, simclr_transform)
+            label_dataset = SimCLRLabeledDataset(train_dataset, evaluation_transform)
             train_loader = DataLoader(label_dataset, batch_size=256, shuffle=True, num_workers=2)
 
             val_dataset = Cub2011(root=str('./cub2011'), train=False, download=False)
-            val_label_dataset = SimCLRLabeledDataset(val_dataset, simclr_transform)
+            val_label_dataset = SimCLRLabeledDataset(val_dataset, evaluation_transform)
             val_loader = DataLoader(val_label_dataset, batch_size=256, shuffle=True, num_workers=2)
 
             # this isn't strictly necessary, but I think it will be consistent with actually using the model for ProxyNCA
@@ -243,31 +245,20 @@ if __name__ == '__main__':
 
     else:
         img = Image.open(input).convert("RGB")
-        inp = evaluation_transform(img).unsqueeze(0)
+        inp = evaluation_transform(img).unsqueeze(0).to(device)
 
         if "SimCLR" in model_file:
-            model = SimCLRModel(model_type[0], projection_dim=128).to(device)
-            model.load_state_dict(torch.load(model_file, map_location=device))
-            model.fc = nn.Linear(model.num_ftrs, 200)
-            model.eval
+            simclr_model = SimCLRModel(model_type[0], projection_dim=128).to(device)
+            simclr_model.load_state_dict(torch.load(model_file, map_location=device))
+            simclr_model.eval
 
-            #print(model.encoder.parameters())
+            linear_classifier = LinearClassifier(simclr_model, 200).to(device).to(device)
+            linear_classifier.load_state_dict(torch.load(args.linear))
 
             with torch.no_grad():
-                out = model(inp)
+                out = linear_classifier(inp)
                 probs = torch.softmax(out, dim=1)
                 pred_class = probs.argmax(dim=1).item()
                 confidence = probs.max().item()
 
             print(f"predicted class: {labels[pred_class]}, confidence: {confidence:.4f}")
-        elif "ProxyNCA" in model_file:
-            base_model = model_type[0](weights='DEFAULT')
-            embedding_dim = base_model.fc.in_features
-            base_model.fc = nn.Linear(128, 200)
-            encoder_model = base_model.to(device)
-
-            proxy_nca_loss_fn = ProxyNCA(num_classes=100, embedding_dim=embedding_dim).to(device)
-            
-            checkpoint = torch.load(model_file, map_location=device)
-            encoder_model.load_state_dict(checkpoint['encoder'])
-            proxy_nca_loss_fn.load_state_dict(checkpoint['proxies'])
