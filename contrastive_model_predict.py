@@ -10,12 +10,24 @@ import torchvision.models as models
 import torchvision.transforms as T
 from torch.utils.data import DataLoader, Dataset
 import sklearn.preprocessing
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report
 from PIL import Image
+from tqdm import tqdm
 
-device = torch.device('cpu')
+device = torch.device('cuda')
 model_types = [(models.resnet18, "resnet18"), (models.resnet50, "resnet50"), (models.resnet101, "resnet101")]
 
 labels_path = "cub2011/CUB_200_2011/classes.txt"
+
+simclr_transform = T.Compose([
+    T.RandomResizedCrop(224),
+    T.RandomHorizontalFlip(),
+    T.RandomApply([T.ColorJitter(0.4,0.4,0.4,0.1)], p=0.8),
+    T.RandomGrayscale(p=0.2),
+    T.GaussianBlur(kernel_size=3),
+    T.ToTensor(),
+    T.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261))
+])
 
 evaluation_transform = T.Compose([
     T.Resize(256),
@@ -41,6 +53,23 @@ class SimCLRModel(nn.Module):
         h = self.encoder(x)
         z = self.projection_head(h)
         return z
+    
+class LinearClassifier(nn.Module):
+    def __init__(self, model, num_classes):
+        super().__init__()
+        self.encoder = model.encoder
+
+        with torch.no_grad():
+            dummy = torch.randn(1, 3, 224, 224).to(device)
+            feat = self.encoder(dummy).flatten(1)
+            num_feat = feat.shape[1]
+        self.classifier = nn.Linear(num_feat, num_classes)
+
+    def forward(self, im):
+        with torch.no_grad():
+            feats = self.encoder(im).flatten(1)
+        logits = self.classifier(feats)
+        return logits
 
 class SimCLRDataset(Dataset):
     def __init__(self, base_dataset, transform):
@@ -52,6 +81,18 @@ class SimCLRDataset(Dataset):
         xi = self.transform(image)
         xj = self.transform(image)
         return xi, xj
+
+    def __len__(self):
+        return len(self.dataset)
+    
+class SimCLRLabeledDataset(Dataset):
+    def __init__(self, base_dataset, transform):
+        self.dataset = base_dataset
+        self.transform = transform
+
+    def __getitem__(self, index):
+        image, label = self.dataset[index]
+        return self.transform(image), label
 
     def __len__(self):
         return len(self.dataset)
@@ -111,7 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="constrastive_model_predict"
     )
-    parser.add_argument("-m", "--model", required=True)
+    parser.add_argument("-t", "--train", type=bool, default=False)
+    parser.add_argument("-m", "--base_model", required=True)
     parser.add_argument("-i", "--input", required=True)
     return parser
 
@@ -127,38 +169,105 @@ if __name__ == '__main__':
             labels.append(line.rstrip("\n"))
 
     args = main()
-    model_file = str(args.model)
+    model_file = str(args.base_model)
     input = args.input
     base_model = re.search(r"resnet\d+", model_file)
     base_model = base_model.group(0) if base_model else None
     model_type = next((m for m in model_types if m[1] == base_model), None)
 
-    img = Image.open(input).convert("RGB")
-    inp = evaluation_transform(img).unsqueeze(0)
+    if args.train:
+        if "SimCLR" in model_file:
+            train_dataset = Cub2011(root=str('./cub2011'), train=True, download=True)
+            label_dataset = SimCLRLabeledDataset(train_dataset, simclr_transform)
+            train_loader = DataLoader(label_dataset, batch_size=256, shuffle=True, num_workers=2)
 
-    if "SimCLR" in model_file:
-        model = SimCLRModel(model_type[0], projection_dim=128).to(device)
-        model.load_state_dict(torch.load(model_file, map_location=device))
-        model.fc = nn.Linear(128, 200)
-        model.eval
+            val_dataset = Cub2011(root=str('./cub2011'), train=False, download=False)
+            val_label_dataset = SimCLRLabeledDataset(val_dataset, simclr_transform)
+            val_loader = DataLoader(val_label_dataset, batch_size=256, shuffle=True, num_workers=2)
 
-        #print(model.encoder.parameters())
+            # this isn't strictly necessary, but I think it will be consistent with actually using the model for ProxyNCA
+            simclr_model = SimCLRModel(model_type[0], projection_dim=128).to(device)
+            simclr_model.load_state_dict(torch.load(model_file, map_location=device))
+            simclr_model.eval()
 
-        with torch.no_grad():
-            out = model(inp)
-            probs = torch.softmax(out, dim=1)
-            pred_class = probs.argmax(dim=1).item()
-            confidence = probs.max().item()
+            linear_classifier = LinearClassifier(simclr_model, 200).to(device)
 
-        print(f"predicted class: {labels[pred_class]}, confidence: {confidence:.4f}")
-    elif "ProxyNCA" in model_file:
-        base_model = model_type[0](weights='DEFAULT')
-        embedding_dim = base_model.fc.in_features
-        base_model.fc = nn.Linear(128, 200)
-        encoder_model = base_model.to(device)
-
-        proxy_nca_loss_fn = ProxyNCA(num_classes=100, embedding_dim=embedding_dim).to(device)
+            # freeze encoder
+            for param in linear_classifier.encoder.parameters():
+                param.requires_grad = False
         
-        checkpoint = torch.load(model_file, map_location=device)
-        encoder_model.load_state_dict(checkpoint['encoder'])
-        proxy_nca_loss_fn.load_state_dict(checkpoint['proxies'])
+            criterion = nn.CrossEntropyLoss()
+            optimizer = torch.optim.SGD(linear_classifier.classifier.parameters(), lr=.03, momentum=0.9)
+
+            epochs = 20
+            for epoch in range(epochs):
+                linear_classifier.train()
+                total_loss = 0.0
+                correct = 0
+                total = 0
+                for i, samples in enumerate(tqdm(train_loader)):
+                    imgs, targets = samples
+                    imgs = imgs.to(device)
+                    targets = targets.to(device)
+                    logits = linear_classifier(imgs)
+                    #print(len(targets))
+                    loss = criterion(logits, targets)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+
+                    total_loss += loss.item() * imgs.size(0)
+                    preds = logits.argmax(dim=1)
+                    correct += (preds == targets).sum().item()
+                    total += imgs.size(0)
+
+                train_accuracy = correct / total
+                avg_loss = total_loss / total
+
+                linear_classifier.eval()
+                vcorrect = 0
+                vtotal = 0
+                with torch.no_grad():
+                    for imgs, targets in val_loader:
+                        imgs = imgs.to(device)
+                        targets = targets.to(device)
+                        logits = linear_classifier(imgs)
+                        preds = logits.argmax(dim=1)
+                        vcorrect += (preds == targets).sum().item()
+                        vtotal += imgs.size(0)
+                val_acc = vcorrect / vtotal
+                print(f"Epoch {epoch+1}/{epochs}  loss={avg_loss:.4f}  train_acc={train_accuracy:.4f}  val_acc={val_acc:.4f}")
+
+                if epoch % 5 == 0:
+                    torch.save(linear_classifier.state_dict(), "SimCLR_linear_classifier.pth")
+
+    else:
+        img = Image.open(input).convert("RGB")
+        inp = evaluation_transform(img).unsqueeze(0)
+
+        if "SimCLR" in model_file:
+            model = SimCLRModel(model_type[0], projection_dim=128).to(device)
+            model.load_state_dict(torch.load(model_file, map_location=device))
+            model.fc = nn.Linear(model.num_ftrs, 200)
+            model.eval
+
+            #print(model.encoder.parameters())
+
+            with torch.no_grad():
+                out = model(inp)
+                probs = torch.softmax(out, dim=1)
+                pred_class = probs.argmax(dim=1).item()
+                confidence = probs.max().item()
+
+            print(f"predicted class: {labels[pred_class]}, confidence: {confidence:.4f}")
+        elif "ProxyNCA" in model_file:
+            base_model = model_type[0](weights='DEFAULT')
+            embedding_dim = base_model.fc.in_features
+            base_model.fc = nn.Linear(128, 200)
+            encoder_model = base_model.to(device)
+
+            proxy_nca_loss_fn = ProxyNCA(num_classes=100, embedding_dim=embedding_dim).to(device)
+            
+            checkpoint = torch.load(model_file, map_location=device)
+            encoder_model.load_state_dict(checkpoint['encoder'])
+            proxy_nca_loss_fn.load_state_dict(checkpoint['proxies'])
