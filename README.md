@@ -2,7 +2,7 @@
 
 ## Penn State University Harrisburg
 
-Ryan Chang, Joel Horne, Haytam Zaami
+Ryan Chang, Joel Horne, Haytham Zaami
 
 The `COMP597_FINAL.ipynb` Jupyter Notebook contains the training and evaluation code and loss results for our SimCLR and ProxyNCA implementations.
 
