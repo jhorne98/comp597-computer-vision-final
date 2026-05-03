@@ -2,3 +2,4 @@
 __pycache__/
 cub2011/
 .venv/
+*.pdf
