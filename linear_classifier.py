@@ -14,7 +14,7 @@ import sklearn.preprocessing
 from PIL import Image
 from tqdm import tqdm
 
-device = torch.device('cuda')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model_types = [(models.resnet18, "resnet18"), (models.resnet50, "resnet50"), (models.resnet101, "resnet101")]
 
 labels_path = "cub2011/CUB_200_2011/classes.txt"

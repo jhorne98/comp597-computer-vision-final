@@ -39,10 +39,10 @@ def main():
     proxynca_encoder.eval()
 
     simclr_classifier = LinearClassifier(simclr_encoder, 200).to(device)
-    simclr_classifier.load_state_dict(torch.load("SimCLR_Classifier_resnet50_50e.pth"))
+    simclr_classifier.load_state_dict(torch.load("SimCLR_Classifier_resnet50_50e.pth", map_location=device))
 
     proxynca_classifier = LinearClassifier(proxynca_encoder, 200).to(device)
-    proxynca_classifier.load_state_dict(torch.load("ProxyNCA_Classifier_resnet50_50e.pth"))
+    proxynca_classifier.load_state_dict(torch.load("ProxyNCA_Classifier_resnet50_50e.pth", map_location=device))
 
     total_simclr_correct = 0
     total_proxynca_correct = 0
