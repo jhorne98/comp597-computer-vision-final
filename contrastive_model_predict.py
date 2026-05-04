@@ -252,18 +252,26 @@ if __name__ == '__main__':
         img = Image.open(input).convert("RGB")
         inp = evaluation_transform(img).unsqueeze(0).to(device)
 
+        classifier_encoder = None
         if "SimCLR" in model_file:
-            simclr_model = SimCLRModel(model_type[0], projection_dim=128).to(device)
-            simclr_model.load_state_dict(torch.load(model_file, map_location=device))
-            simclr_model.eval
+            classifier_encoder = SimCLRModel(model_type[0], projection_dim=128).to(device)
+            classifier_encoder.load_state_dict(torch.load(model_file, map_location=device).encoder)
+        if "ProxyNCA" in model_file:
+            classifier_encoder = model_type[0](weights=None)
+            classifier_encoder.fc = nn.Linear(classifier_encoder.fc.in_features, 64)
+            classifier_encoder.to(device)
+            classifier_encoder.load_state_dict(torch.load(model_file, map_location=device)['encoder'])
+        else:
+            sys.exit("Improper filename: Must include 'SimCLR' or 'ProxyNCA'")
+        
+        classifier_encoder.eval()
+        linear_classifier = LinearClassifier(classifier_encoder, 200).to(device).to(device)
+        linear_classifier.load_state_dict(torch.load(args.linear))
 
-            linear_classifier = LinearClassifier(simclr_model, 200).to(device).to(device)
-            linear_classifier.load_state_dict(torch.load(args.linear))
+        with torch.no_grad():
+            out = linear_classifier(inp)
+            probs = torch.softmax(out, dim=1)
+            pred_class = probs.argmax(dim=1).item()
+            confidence = probs.max().item()
 
-            with torch.no_grad():
-                out = linear_classifier(inp)
-                probs = torch.softmax(out, dim=1)
-                pred_class = probs.argmax(dim=1).item()
-                confidence = probs.max().item()
-
-            print(f"predicted class: {labels[pred_class]}, confidence: {confidence:.4f}")
+        print(f"predicted class: {labels[pred_class]}, confidence: {confidence:.4f}")
