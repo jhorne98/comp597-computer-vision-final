@@ -10,7 +10,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 labels_path = "cub2011/CUB_200_2011/classes.txt"
 images_path = "cub2011/CUB_200_2011/images.txt"
 
-rounds = 1000
+rounds = 2000
 
 def main():
     labels = []
