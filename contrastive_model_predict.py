@@ -97,30 +97,6 @@ class SimCLRLabeledDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-def extract_embeddings_labels(model, loader):
-    embeddings, labels = [], []
-    with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device)
-            z = model(x)
-            embeddings.append(z.cpu())
-            labels.append(y)
-    return torch.cat(embeddings), torch.cat(labels)
-
-def recall_at_k(embeddings, labels, k=3):
-    correct = 0
-    numEmbeddings = len(labels)
-    for i in range(numEmbeddings):
-        current_embedding = embeddings[i]
-        dist = torch.norm(embeddings - current_embedding, dim=1, p = None)
-        dist[i] = float('inf')
-        k_nearest = dist.topk(k, largest=False)
-        for idx in k_nearest.indices:
-            if labels[idx] == labels[i]:
-                correct += 1
-                break
-    return correct / numEmbeddings
-
 def binarize_and_smooth_labels(T, nb_classes, smoothing_const=0.1):
     T = T.cpu().numpy()
     T = sklearn.preprocessing.label_binarize(T, classes=range(nb_classes))
