@@ -164,7 +164,8 @@ if __name__ == '__main__':
         classifier_encoder = None
         if "SimCLR" in model_file:
             classifier_encoder = SimCLRModel(model_type[0], projection_dim=128).to(device)
-            classifier_encoder.load_state_dict(torch.load(model_file, map_location=device).encoder)
+            classifier_encoder.load_state_dict(torch.load(model_file, map_location=device))
+            classifier_encoder = classifier_encoder.encoder
         elif "ProxyNCA" in model_file:
             classifier_encoder = model_type[0](weights=None)
             classifier_encoder.fc = nn.Linear(classifier_encoder.fc.in_features, 64)
@@ -228,11 +229,13 @@ if __name__ == '__main__':
         img = Image.open(input).convert("RGB")
         inp = evaluation_transform(img).unsqueeze(0).to(device)
 
+        print(model_file)
         classifier_encoder = None
         if "SimCLR" in model_file:
             classifier_encoder = SimCLRModel(model_type[0], projection_dim=128).to(device)
-            classifier_encoder.load_state_dict(torch.load(model_file, map_location=device).encoder)
-        if "ProxyNCA" in model_file:
+            classifier_encoder.load_state_dict(torch.load(model_file, map_location=device))
+            classifier_encoder = classifier_encoder.encoder
+        elif "ProxyNCA" in model_file:
             classifier_encoder = model_type[0](weights=None)
             classifier_encoder.fc = nn.Linear(classifier_encoder.fc.in_features, 64)
             classifier_encoder.to(device)
@@ -241,7 +244,7 @@ if __name__ == '__main__':
             sys.exit("Improper filename: Must include 'SimCLR' or 'ProxyNCA'")
         
         classifier_encoder.eval()
-        linear_classifier = LinearClassifier(classifier_encoder, 200).to(device).to(device)
+        linear_classifier = LinearClassifier(classifier_encoder, 200).to(device)
         linear_classifier.load_state_dict(torch.load(args.linear))
 
         with torch.no_grad():
