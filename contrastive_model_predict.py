@@ -1,5 +1,6 @@
 import argparse
 import re
+import sys
 
 from cub2011 import Cub2011
 
@@ -10,7 +11,6 @@ import torchvision.models as models
 import torchvision.transforms as T
 from torch.utils.data import DataLoader, Dataset
 import sklearn.preprocessing
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report
 from PIL import Image
 from tqdm import tqdm
 
@@ -57,7 +57,7 @@ class SimCLRModel(nn.Module):
 class LinearClassifier(nn.Module):
     def __init__(self, model, num_classes):
         super().__init__()
-        self.encoder = model.encoder
+        self.encoder = model
 
         with torch.no_grad():
             dummy = torch.randn(1, 3, 224, 224).to(device)
@@ -152,10 +152,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="constrastive_model_predict"
     )
-    parser.add_argument("-t", "--train", type=bool, default=False)
-    parser.add_argument("-m", "--base_model", required=True)
+    parser.add_argument("-m", "--base_model", required=False)
     parser.add_argument("-l", "--linear", required=True)
-    parser.add_argument("-i", "--input", required=True)
+    parser.add_argument("-i", "--input", required=False)
     return parser
 
 def main(argv=None):
@@ -174,75 +173,81 @@ if __name__ == '__main__':
     input = args.input
     base_model = re.search(r"resnet\d+", model_file)
     base_model = base_model.group(0) if base_model else None
-    model_type = next((m for m in model_types if m[1] == base_model), None)
+    model_type = next((m for m in model_types if m[1] == base_model), None) # select the correct backbone based on the model in the filename
 
-    print(args.train)
-    if args.train:
+    if args.input is None:
+        train_dataset = Cub2011(root=str('./cub2011'), train=True, download=True)
+        label_dataset = SimCLRLabeledDataset(train_dataset, evaluation_transform)
+        train_loader = DataLoader(label_dataset, batch_size=128, shuffle=True, num_workers=2)
+
+        val_dataset = Cub2011(root=str('./cub2011'), train=False, download=False)
+        val_label_dataset = SimCLRLabeledDataset(val_dataset, evaluation_transform)
+        val_loader = DataLoader(val_label_dataset, batch_size=128, shuffle=True, num_workers=2)
+
+        print(model_file)
+        classifier_encoder = None
         if "SimCLR" in model_file:
-            train_dataset = Cub2011(root=str('./cub2011'), train=True, download=True)
-            label_dataset = SimCLRLabeledDataset(train_dataset, evaluation_transform)
-            train_loader = DataLoader(label_dataset, batch_size=256, shuffle=True, num_workers=2)
+            classifier_encoder = SimCLRModel(model_type[0], projection_dim=128).to(device)
+            classifier_encoder.load_state_dict(torch.load(model_file, map_location=device).encoder)
+        elif "ProxyNCA" in model_file:
+            classifier_encoder = model_type[0](weights=None)
+            classifier_encoder.fc = nn.Linear(classifier_encoder.fc.in_features, 64)
+            classifier_encoder.to(device)
+            classifier_encoder.load_state_dict(torch.load(model_file, map_location=device)['encoder'])
+        else:
+            sys.exit("Improper filename: Must include 'SimCLR' or 'ProxyNCA'")
 
-            val_dataset = Cub2011(root=str('./cub2011'), train=False, download=False)
-            val_label_dataset = SimCLRLabeledDataset(val_dataset, evaluation_transform)
-            val_loader = DataLoader(val_label_dataset, batch_size=256, shuffle=True, num_workers=2)
+        classifier_encoder.eval()
+        linear_classifier = LinearClassifier(classifier_encoder, 200).to(device)
 
-            # this isn't strictly necessary, but I think it will be consistent with actually using the model for ProxyNCA
-            simclr_model = SimCLRModel(model_type[0], projection_dim=128).to(device)
-            simclr_model.load_state_dict(torch.load(model_file, map_location=device))
-            simclr_model.eval()
+        # freeze encoder
+        for param in linear_classifier.encoder.parameters():
+            param.requires_grad = False
+    
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.SGD(linear_classifier.classifier.parameters(), lr=.04, momentum=0.9)
 
-            linear_classifier = LinearClassifier(simclr_model, 200).to(device)
+        epochs = 20
+        for epoch in range(epochs):
+            linear_classifier.train()
+            total_loss = 0.0
+            correct = 0
+            total = 0
+            for i, samples in enumerate(tqdm(train_loader)):
+                imgs, targets = samples
+                imgs = imgs.to(device)
+                targets = targets.to(device)
+                logits = linear_classifier(imgs)
+                #print(len(targets))
+                loss = criterion(logits, targets)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-            # freeze encoder
-            for param in linear_classifier.encoder.parameters():
-                param.requires_grad = False
-        
-            criterion = nn.CrossEntropyLoss()
-            optimizer = torch.optim.SGD(linear_classifier.classifier.parameters(), lr=.03, momentum=0.9)
+                total_loss += loss.item() * imgs.size(0)
+                preds = logits.argmax(dim=1)
+                correct += (preds == targets).sum().item()
+                total += imgs.size(0)
 
-            epochs = 20
-            for epoch in range(epochs):
-                linear_classifier.train()
-                total_loss = 0.0
-                correct = 0
-                total = 0
-                for i, samples in enumerate(tqdm(train_loader)):
-                    imgs, targets = samples
+            train_accuracy = correct / total
+            avg_loss = total_loss / total
+
+            linear_classifier.eval()
+            vcorrect = 0
+            vtotal = 0
+            with torch.no_grad():
+                for imgs, targets in val_loader:
                     imgs = imgs.to(device)
                     targets = targets.to(device)
                     logits = linear_classifier(imgs)
-                    #print(len(targets))
-                    loss = criterion(logits, targets)
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
-
-                    total_loss += loss.item() * imgs.size(0)
                     preds = logits.argmax(dim=1)
-                    correct += (preds == targets).sum().item()
-                    total += imgs.size(0)
+                    vcorrect += (preds == targets).sum().item()
+                    vtotal += imgs.size(0)
+            val_acc = vcorrect / vtotal
+            print(f"Epoch {epoch+1}/{epochs}  loss={avg_loss:.4f}  train_acc={train_accuracy:.4f}  val_acc={val_acc:.4f}")
 
-                train_accuracy = correct / total
-                avg_loss = total_loss / total
-
-                linear_classifier.eval()
-                vcorrect = 0
-                vtotal = 0
-                with torch.no_grad():
-                    for imgs, targets in val_loader:
-                        imgs = imgs.to(device)
-                        targets = targets.to(device)
-                        logits = linear_classifier(imgs)
-                        preds = logits.argmax(dim=1)
-                        vcorrect += (preds == targets).sum().item()
-                        vtotal += imgs.size(0)
-                val_acc = vcorrect / vtotal
-                print(f"Epoch {epoch+1}/{epochs}  loss={avg_loss:.4f}  train_acc={train_accuracy:.4f}  val_acc={val_acc:.4f}")
-
-                if epoch % 5 == 0:
-                    torch.save(linear_classifier.state_dict(), "SimCLR_linear_classifier.pth")
-
+            if epoch % 5 == 0:
+                torch.save(linear_classifier.state_dict(), args.linear)
     else:
         img = Image.open(input).convert("RGB")
         inp = evaluation_transform(img).unsqueeze(0).to(device)
